@@ -1,0 +1,112 @@
+#include <mpi.h>
+#include <iostream>
+#include <omp.h>
+#include <random>
+#include <ctime>
+#include <cstdlib>
+
+using namespace std;
+
+class GeneradorArreglo {
+public:
+
+    static int* crear(long long tamano) {
+        return new int[tamano];
+    }
+
+    static void llenarConAvance(int* arreglo, long long tamano, int rank, const char* nombreEquipo) {
+        long long completados = 0;
+        bool impreso[11] = { false };
+        #pragma omp parallel
+        {
+            int idHilo = omp_get_thread_num();
+
+            thread_local mt19937 generador((unsigned int)time(NULL) + rank * 104729u + idHilo * 7919u);
+            uniform_int_distribution<int> distribucion(0, 1000);
+
+            #pragma omp for schedule(static)
+            for (long long i = 0; i < tamano; i++) {
+                arreglo[i] = distribucion(generador);
+
+                long long miConteo;
+                #pragma omp atomic capture
+                miConteo = ++completados;
+
+                int nivel = (int)((miConteo * 10) / tamano);
+
+                if (nivel >= 1 && nivel <= 10) {
+                    #pragma omp critical(progreso)
+                    {
+                        if (!impreso[nivel]) {
+                            impreso[nivel] = true;
+                            cout << "Progreso: " << (nivel * 10) << "%"
+                                 << " - Proceso: " << rank
+                                 << " - Equipo: " << nombreEquipo
+                                 << " - Hilo OpenMP: " << idHilo << endl;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    static void imprimir(int* arreglo, long long tamano, int rank, int numProcesos, const char* nombreEquipo) {
+        cout << "\n=== Arreglo del proceso " << rank << " de " << numProcesos
+             << " (Equipo: " << nombreEquipo << ") - " << tamano << " elementos ===\n[ ";
+        for (long long i = 0; i < tamano; i++) {
+            cout << arreglo[i] << " ";
+        }
+        cout << "]\n";
+    }
+
+    static void liberar(int*& arreglo) {
+        delete[] arreglo;
+        arreglo = nullptr;
+    }
+};
+
+int main(int argc, char** argv) {
+
+    MPI_Init(&argc, &argv);
+
+    int rank, numProcesos;
+    MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+    MPI_Comm_size(MPI_COMM_WORLD, &numProcesos);
+
+    char nombreEquipo[MPI_MAX_PROCESSOR_NAME];
+    int longitudNombre;
+    MPI_Get_processor_name(nombreEquipo, &longitudNombre);
+
+    if (rank == 0) {
+        cout << "Avila Martinez Marco | Larios Hernandez Carlos Alberto | Macias Renteria Dante Yael | Salcedo Ramos Luis Gael\n";
+        cout << "Total de procesos MPI participantes: " << numProcesos << "\n\n";
+    }
+
+    long long tamano;
+    if (argc > 1) {
+        tamano = atoll(argv[1]);
+    } else {
+        mt19937 generadorTamano((unsigned int)time(NULL) + rank * 999983u);
+        uniform_int_distribution<int> distTamano(20, 50);
+        tamano = distTamano(generadorTamano);
+    }
+
+    cout << "[Proceso " << rank << " en " << nombreEquipo << "] Tamano de su arreglo: "
+         << tamano << " elementos. Iniciando llenado...\n";
+
+    int* arreglo = GeneradorArreglo::crear(tamano);
+    GeneradorArreglo::llenarConAvance(arreglo, tamano, rank, nombreEquipo);
+
+    GeneradorArreglo::imprimir(arreglo, tamano, rank, numProcesos, nombreEquipo);
+
+    GeneradorArreglo::liberar(arreglo);
+
+    MPI_Barrier(MPI_COMM_WORLD);
+
+    if (rank == 0) {
+        cout << "\nAvila Martinez Marco | Larios Hernandez Carlos Alberto | Macias Renteria Dante Yael | Salcedo Ramos Luis Gael\n";
+    }
+
+    MPI_Finalize();
+    return 0;
+}
