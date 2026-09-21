@@ -1,0 +1,309 @@
+#include <mpi.h>
+#include <iostream>
+#include <iomanip>
+#include <omp.h>
+#include <random>
+#include <ctime>
+#include <cstdlib>
+
+using namespace std;
+
+class OperacionesArreglos {
+public:
+
+    static void crearArregloMPI(long long* arr, long long inicioGlobal, long long cantidad,
+                                  int rank, const char* equipo, bool modoAleatorio) {
+        #pragma omp parallel
+        {
+            int idHilo = omp_get_thread_num();
+            thread_local mt19937 generador((unsigned int)time(NULL) + rank * 104729u + idHilo * 7919u);
+            uniform_int_distribution<long long> distribucion(1, 1000000);
+
+            #pragma omp for schedule(static)
+            for (long long i = 0; i < cantidad; i++) {
+                arr[i] = modoAleatorio ? distribucion(generador) : (inicioGlobal + i);
+            }
+        }
+    }
+
+    static void mostrarSeccionCreada(long long* arr, long long cantidad, long long inicioGlobal,
+                                       int rank, const char* equipo, const char* nombreArreglo) {
+        #pragma omp parallel
+        {
+            int idHilo = omp_get_thread_num();
+            #pragma omp for schedule(static)
+            for (long long i = 0; i < cantidad; i++) {
+                #pragma omp critical(impresionCreacion)
+                {
+                    cout << "[Equipo: " << equipo << "][Proceso MPI: " << rank
+                         << "][Hilo OpenMP: " << idHilo << "][Arreglo: " << nombreArreglo
+                         << "][Posicion: " << (inicioGlobal + i)
+                         << "][Valor: " << arr[i] << "]" << endl;
+                }
+            }
+        }
+    }
+
+    static void sumarSeccion(long long* A, long long* B, long long* R, long long cantidad,
+                               long long inicioGlobal, int rank, const char* equipo, bool detallado) {
+        #pragma omp parallel
+        {
+            int idHilo = omp_get_thread_num();
+            #pragma omp for schedule(static)
+            for (long long i = 0; i < cantidad; i++) {
+                R[i] = A[i] + B[i];
+                if (detallado) {
+                    #pragma omp critical(impresionOperacion)
+                    {
+                        cout << "[Equipo: " << equipo << "][Proceso MPI: " << rank
+                             << "][Hilo OpenMP: " << idHilo << "][Posicion: " << (inicioGlobal + i)
+                             << "][Operacion: Suma]" << endl;
+                    }
+                }
+            }
+        }
+    }
+
+    static void restarSeccion(long long* A, long long* B, long long* R, long long cantidad,
+                                long long inicioGlobal, int rank, const char* equipo, bool detallado) {
+        #pragma omp parallel
+        {
+            int idHilo = omp_get_thread_num();
+            #pragma omp for schedule(static)
+            for (long long i = 0; i < cantidad; i++) {
+                R[i] = A[i] - B[i];
+                if (detallado) {
+                    #pragma omp critical(impresionOperacion)
+                    {
+                        cout << "[Equipo: " << equipo << "][Proceso MPI: " << rank
+                             << "][Hilo OpenMP: " << idHilo << "][Posicion: " << (inicioGlobal + i)
+                             << "][Operacion: Resta]" << endl;
+                    }
+                }
+            }
+        }
+    }
+
+    static void multiplicarSeccion(long long* A, long long* B, long long* R, long long cantidad,
+                                     long long inicioGlobal, int rank, const char* equipo, bool detallado) {
+        #pragma omp parallel
+        {
+            int idHilo = omp_get_thread_num();
+            #pragma omp for schedule(static)
+            for (long long i = 0; i < cantidad; i++) {
+                R[i] = A[i] * B[i];
+                if (detallado) {
+                    #pragma omp critical(impresionOperacion)
+                    {
+                        cout << "[Equipo: " << equipo << "][Proceso MPI: " << rank
+                             << "][Hilo OpenMP: " << idHilo << "][Posicion: " << (inicioGlobal + i)
+                             << "][Operacion: Multiplicacion]" << endl;
+                    }
+                }
+            }
+        }
+    }
+
+    static void cuadradoSeccion(long long* A, long long* R, long long cantidad,
+                                  long long inicioGlobal, int rank, const char* equipo, bool detallado) {
+        #pragma omp parallel
+        {
+            int idHilo = omp_get_thread_num();
+            #pragma omp for schedule(static)
+            for (long long i = 0; i < cantidad; i++) {
+                R[i] = A[i] * A[i];
+                if (detallado) {
+                    #pragma omp critical(impresionOperacion)
+                    {
+                        cout << "[Equipo: " << equipo << "][Proceso MPI: " << rank
+                             << "][Hilo OpenMP: " << idHilo << "][Posicion: " << (inicioGlobal + i)
+                             << "][Operacion: Cuadrado]" << endl;
+                    }
+                }
+            }
+        }
+    }
+};
+
+void distribuirScatter(long long* completo, long long* local, long long tamanoLocal) {
+    MPI_Scatter(completo, tamanoLocal, MPI_LONG_LONG,
+                local, tamanoLocal, MPI_LONG_LONG,
+                0, MPI_COMM_WORLD);
+}
+
+void recolectarGather(long long* completo, long long* local, long long tamanoLocal) {
+    MPI_Gather(local, tamanoLocal, MPI_LONG_LONG,
+               completo, tamanoLocal, MPI_LONG_LONG,
+               0, MPI_COMM_WORLD);
+}
+
+const long long LIMITE_IMPRESION = 200;
+
+void imprimirArreglo(const string& nombre, long long* arr, long long n) {
+    cout << nombre << ": [ ";
+    for (long long i = 0; i < n; i++) cout << arr[i] << " ";
+    cout << "]" << endl;
+}
+
+int main(int argc, char** argv) {
+    MPI_Init(&argc, &argv);
+
+    int rank, numProcesos;
+    MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+    MPI_Comm_size(MPI_COMM_WORLD, &numProcesos);
+
+    char equipo[MPI_MAX_PROCESSOR_NAME];
+    int longitudNombre;
+    MPI_Get_processor_name(equipo, &longitudNombre);
+
+    if (rank == 0) {
+        cout << "Avila Martinez Marco | Larios Hernandez Carlos Alberto | Macias Renteria Dante Yael | Salcedo Ramos Luis Gael\n";
+        cout << "=== VERSION Scatter/Gather ===\n";
+        cout << "Procesos MPI: " << numProcesos << " (1 maestro + " << (numProcesos - 1) << " trabajadores)\n";
+    }
+
+    long long tamano = 0, tamanoLocal = 0, inicioLocal = 0;
+    long long* A = nullptr;
+    long long* B = nullptr;
+    long long* R = nullptr;
+    long long* Alocal = nullptr;
+    long long* Blocal = nullptr;
+    long long* Rlocal = nullptr;
+    bool detallado = true;
+
+    int opcion = -1;
+
+    do {
+        if (rank == 0) {
+            cout << "\n===== MENU OPERACIONES DISTRIBUIDAS (MPI + OpenMP - Scatter/Gather) =====\n";
+            cout << "1. Crear arreglos\n";
+            cout << "2. Sumar arreglos\n";
+            cout << "3. Restar arreglos\n";
+            cout << "4. Multiplicar arreglos\n";
+            cout << "5. Cuadrado del arreglo A\n";
+            cout << "6. Salir\n";
+            cout << "Seleccione una opcion: ";
+            cin >> opcion;
+        }
+
+        MPI_Bcast(&opcion, 1, MPI_INT, 0, MPI_COMM_WORLD);
+
+        if (opcion == 1) {
+            if (rank == 0) {
+                cout << "Ingrese el tamano TOTAL del arreglo (debe ser multiplo de " << numProcesos << "): ";
+                cin >> tamano;
+            }
+            MPI_Bcast(&tamano, 1, MPI_LONG_LONG, 0, MPI_COMM_WORLD);
+
+            if (tamano <= 0 || tamano % numProcesos != 0) {
+                if (rank == 0) cout << "Tamano invalido: debe ser mayor a 0 y multiplo exacto de " << numProcesos << ".\n";
+                continue;
+            }
+
+            char modoChar = 'C', detalladoChar = 'S';
+            if (rank == 0) {
+                cout << "Modo de llenado - Consecutivo (C) o Aleatorio (A)?: ";
+                cin >> modoChar;
+                cout << "Mostrar mensajes detallados por elemento? (S/N): ";
+                cin >> detalladoChar;
+            }
+            MPI_Bcast(&modoChar, 1, MPI_CHAR, 0, MPI_COMM_WORLD);
+            MPI_Bcast(&detalladoChar, 1, MPI_CHAR, 0, MPI_COMM_WORLD);
+            bool modoAleatorio = (modoChar == 'A' || modoChar == 'a');
+            detallado = (detalladoChar == 'S' || detalladoChar == 's');
+
+            delete[] A; delete[] B; delete[] R; A = B = R = nullptr;
+            delete[] Alocal; delete[] Blocal; delete[] Rlocal;
+
+            tamanoLocal = tamano / numProcesos;
+            inicioLocal = (long long)rank * tamanoLocal;
+            Alocal = new long long[tamanoLocal];
+            Blocal = new long long[tamanoLocal];
+
+            if (rank == 0) {
+                A = new long long[tamano];
+                B = new long long[tamano];
+                R = new long long[tamano];
+                OperacionesArreglos::crearArregloMPI(A, 0, tamano, 0, equipo, modoAleatorio);
+                OperacionesArreglos::crearArregloMPI(B, 0, tamano, 0, equipo, modoAleatorio);
+                cout << "\n[Proceso 0 - " << equipo << "] Arreglos generados. Distribuyendo secciones (Scatter)...\n";
+            }
+
+            distribuirScatter(A, Alocal, tamanoLocal);
+            distribuirScatter(B, Blocal, tamanoLocal);
+
+            if (detallado) {
+                OperacionesArreglos::mostrarSeccionCreada(Alocal, tamanoLocal, inicioLocal, rank, equipo, "A");
+                OperacionesArreglos::mostrarSeccionCreada(Blocal, tamanoLocal, inicioLocal, rank, equipo, "B");
+            }
+
+            MPI_Barrier(MPI_COMM_WORLD);
+            if (rank == 0) {
+                cout << "[Proceso 0 - " << equipo << "] Arreglos creados y distribuidos correctamente ("
+                     << tamanoLocal << " elementos por proceso).\n";
+            }
+        }
+        else if (opcion >= 2 && opcion <= 5) {
+            if (Alocal == nullptr) {
+                if (rank == 0) cout << "Primero debe crear los arreglos (opcion 1).\n";
+                continue;
+            }
+
+            delete[] Rlocal;
+            Rlocal = new long long[tamanoLocal];
+
+            MPI_Barrier(MPI_COMM_WORLD);
+            double inicioTiempo = MPI_Wtime();
+
+            const char* nombreOp = "";
+            switch (opcion) {
+                case 2: nombreOp = "SUMA";
+                    OperacionesArreglos::sumarSeccion(Alocal, Blocal, Rlocal, tamanoLocal, inicioLocal, rank, equipo, detallado);
+                    break;
+                case 3: nombreOp = "RESTA";
+                    OperacionesArreglos::restarSeccion(Alocal, Blocal, Rlocal, tamanoLocal, inicioLocal, rank, equipo, detallado);
+                    break;
+                case 4: nombreOp = "MULTIPLICACION";
+                    OperacionesArreglos::multiplicarSeccion(Alocal, Blocal, Rlocal, tamanoLocal, inicioLocal, rank, equipo, detallado);
+                    break;
+                case 5: nombreOp = "CUADRADO";
+                    OperacionesArreglos::cuadradoSeccion(Alocal, Rlocal, tamanoLocal, inicioLocal, rank, equipo, detallado);
+                    break;
+            }
+
+            if (rank == 0 && R == nullptr) R = new long long[tamano];
+            recolectarGather(R, Rlocal, tamanoLocal);
+
+            double finTiempo = MPI_Wtime();
+
+            if (rank == 0) {
+                cout << "\n--- Resultado: " << nombreOp << " ---\n";
+                if (tamano <= LIMITE_IMPRESION) {
+                    imprimirArreglo("Arreglo R", R, tamano);
+                } else {
+                    cout << "Arreglo demasiado grande para mostrarse en consola.\n";
+                }
+                cout << fixed << setprecision(6);
+                cout << "Tiempo de ejecucion (Scatter/Gather): " << (finTiempo - inicioTiempo) << " segundos\n";
+            }
+        }
+        else if (opcion == 6) {
+            if (rank == 0) cout << "Saliendo del programa...\n";
+        }
+        else {
+            if (rank == 0) cout << "Opcion invalida.\n";
+        }
+
+    } while (opcion != 6);
+
+    delete[] A; delete[] B; delete[] R;
+    delete[] Alocal; delete[] Blocal; delete[] Rlocal;
+
+    MPI_Barrier(MPI_COMM_WORLD);
+    if (rank == 0) {
+        cout << "\nAvila Martinez Marco | Larios Hernandez Carlos Alberto | Macias Renteria Dante Yael | Salcedo Ramos Luis Gael\n";
+    }
+
+    MPI_Finalize();
+    return 0;
+}
