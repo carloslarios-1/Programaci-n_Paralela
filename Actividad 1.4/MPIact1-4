@@ -1,0 +1,261 @@
+#include <mpi.h>
+#include <iostream>
+#include <fstream>
+#include <sstream>
+#include <iomanip>
+#include <omp.h>
+#include <random>
+#include <ctime>
+#include <cstring>
+
+using namespace std;
+
+struct Transaccion {
+    int id_cliente;      
+    int id_hilo_openmp;   
+    int tipo_operacion;  
+    double monto;        
+};
+
+struct RespuestaServidor {
+    bool aprobada;       
+    double saldo_resultante; 
+    char mensaje[100];     
+};
+
+const int TAG_TRANSACCION = 1;
+const int TAG_RESPUESTA = 2;
+const int TAG_FIN = 99;
+
+class RegistroLog {
+private:
+    ofstream archivo;
+public:
+    RegistroLog(const string& nombreArchivo) { archivo.open(nombreArchivo); }
+    ~RegistroLog() { if (archivo.is_open()) archivo.close(); }
+    void escribir(const string& mensaje) {
+        cout << mensaje << endl;
+        if (archivo.is_open()) {
+            archivo << mensaje << endl;
+            archivo.flush();
+        }
+    }
+};
+
+string formatoMonto(double monto) {
+    ostringstream oss;
+    oss << fixed << setprecision(2) << "$" << monto;
+    return oss.str();
+}
+
+void ejecutarServidor(int numProcesos, const string& equipo, RegistroLog& log, bool detallado,
+                        long long& transaccionesProcesadas, double& saldo_cuenta) {
+    int clientesActivos = numProcesos - 1;
+    transaccionesProcesadas = 0;
+
+    while (clientesActivos > 0) {
+        MPI_Status estado;
+        Transaccion solicitud;
+        MPI_Recv(&solicitud, sizeof(Transaccion), MPI_BYTE, MPI_ANY_SOURCE, MPI_ANY_TAG, MPI_COMM_WORLD, &estado);
+
+        if (estado.MPI_TAG == TAG_FIN) {
+            clientesActivos--;
+            continue; // esta senal no se responde, solo cuenta para saber cuando terminar
+        }
+
+        RespuestaServidor respuesta;
+        string nombreOp;
+
+        switch (solicitud.tipo_operacion) {
+            case 1: // Deposito
+                nombreOp = "Deposito";
+                saldo_cuenta += solicitud.monto;
+                respuesta.aprobada = true;
+                respuesta.saldo_resultante = saldo_cuenta;
+                strcpy(respuesta.mensaje, "Deposito aprobado");
+                break;
+            case 2: // Retiro
+                nombreOp = "Retiro";
+                if (saldo_cuenta >= solicitud.monto) {
+                    saldo_cuenta -= solicitud.monto;
+                    respuesta.aprobada = true;
+                    strcpy(respuesta.mensaje, "Retiro aprobado");
+                } else {
+                    respuesta.aprobada = false;
+                    strcpy(respuesta.mensaje, "Fondos insuficientes");
+                }
+                respuesta.saldo_resultante = saldo_cuenta;
+                break;
+            case 3: // Consulta
+            default:
+                nombreOp = "Consulta";
+                respuesta.aprobada = true;
+                respuesta.saldo_resultante = saldo_cuenta;
+                strcpy(respuesta.mensaje, "Consulta realizada");
+                break;
+        }
+
+        transaccionesProcesadas++;
+
+        if (detallado) {
+            ostringstream msg;
+            msg << "[Equipo: " << equipo << "][Nodo MPI: " << estado.MPI_SOURCE
+                << "][Hilo OpenMP: " << solicitud.id_hilo_openmp << "][Op: " << nombreOp
+                << "][Monto: " << formatoMonto(solicitud.monto) << "][Estado: "
+                << (respuesta.aprobada ? "Aprobado" : "Rechazado")
+                << "][Saldo: " << formatoMonto(respuesta.saldo_resultante) << "]";
+            log.escribir(msg.str());
+        }
+
+        MPI_Send(&respuesta, sizeof(RespuestaServidor), MPI_BYTE, estado.MPI_SOURCE, TAG_RESPUESTA, MPI_COMM_WORLD);
+    }
+}
+
+void ejecutarCliente(int rank, const string& equipo, RegistroLog& log, bool detallado, long long operacionesPorCliente) {
+    #pragma omp parallel
+    {
+        int tid = omp_get_thread_num();
+        int numHilos = omp_get_num_threads();
+
+        long long base = operacionesPorCliente / numHilos;
+        long long resto = operacionesPorCliente % numHilos;
+        long long cantidad = base + (tid < resto ? 1 : 0);
+
+        thread_local mt19937 generador((unsigned int)time(NULL) + rank * 104729u + tid * 7919u);
+        uniform_int_distribution<int> distTipo(1, 3); // 1 deposito, 2 retiro, 3 consulta
+        uniform_real_distribution<double> distMonto(10.0, 2000.0);
+
+        for (long long i = 0; i < cantidad; i++) {
+            Transaccion solicitud;
+            solicitud.id_cliente = rank;
+            solicitud.id_hilo_openmp = tid;
+            solicitud.tipo_operacion = distTipo(generador);
+            solicitud.monto = (solicitud.tipo_operacion == 3) ? 0.0 : distMonto(generador);
+
+            RespuestaServidor respuesta;
+
+            #pragma omp critical(comunicacionMPI)
+            {
+                MPI_Send(&solicitud, sizeof(Transaccion), MPI_BYTE, 0, TAG_TRANSACCION, MPI_COMM_WORLD);
+                MPI_Recv(&respuesta, sizeof(RespuestaServidor), MPI_BYTE, 0, TAG_RESPUESTA, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+            }
+
+            if (detallado) {
+                string nombreOp = (solicitud.tipo_operacion == 1) ? "Deposito" :
+                                   (solicitud.tipo_operacion == 2) ? "Retiro" : "Consulta";
+                ostringstream msg;
+                msg << "[Equipo: " << equipo << "][Proceso MPI: " << rank << "][Hilo OpenMP: " << tid
+                    << "][Operacion: " << nombreOp << "][Monto: " << formatoMonto(solicitud.monto)
+                    << "][Estado: " << (respuesta.aprobada ? "Aprobado" : "Rechazado")
+                    << "][Saldo Final: " << formatoMonto(respuesta.saldo_resultante) << "]";
+                #pragma omp critical(logCliente)
+                { log.escribir(msg.str()); }
+            }
+        }
+    }
+
+    Transaccion finMsg;
+    finMsg.id_cliente = rank;
+    finMsg.id_hilo_openmp = -1;
+    finMsg.tipo_operacion = 0;
+    finMsg.monto = 0.0;
+    MPI_Send(&finMsg, sizeof(Transaccion), MPI_BYTE, 0, TAG_FIN, MPI_COMM_WORLD);
+}
+
+int main(int argc, char** argv) {
+    int provisto;
+    MPI_Init_thread(&argc, &argv, MPI_THREAD_SERIALIZED, &provisto);
+
+    int rank, numProcesos;
+    MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+    MPI_Comm_size(MPI_COMM_WORLD, &numProcesos);
+
+    char nombreEquipoBuf[MPI_MAX_PROCESSOR_NAME];
+    int longitudNombre;
+    MPI_Get_processor_name(nombreEquipoBuf, &longitudNombre);
+    string equipo(nombreEquipoBuf);
+
+    ostringstream nombreLog;
+    nombreLog << "log_equipo_" << equipo << "_nodo_" << rank << ".txt";
+    RegistroLog log(nombreLog.str());
+
+    {
+        ostringstream encabezado;
+        encabezado << "[Equipo: " << equipo << "][Nodo MPI: " << rank << "][Rol: "
+                    << (rank == 0 ? "SERVIDOR" : "CLIENTE") << "][Hilos OpenMP detectados: "
+                    << omp_get_max_threads() << "]";
+        log.escribir(encabezado.str());
+        if (rank == 0) {
+            log.escribir("Avila Martinez Marco | Larios Hernandez Carlos Alberto | Macias Renteria Dante Yael | Salcedo Ramos Luis Gael");
+        }
+    }
+
+    double saldo_cuenta = 10000.00;
+    int opcion = -1;
+
+    do {
+        if (rank == 0) {
+            cout << "\n===== SISTEMA BANCARIO CLIENTE-SERVIDOR (MPI + OpenMP) =====\n";
+            cout << "1. Iniciar Simulacion Basica (5 operaciones por cliente)\n";
+            cout << "2. Iniciar Simulacion Masiva (100,000 operaciones por cliente)\n";
+            cout << "3. Consultar Saldo Final del Servidor\n";
+            cout << "4. Salir\n";
+            cout << "Seleccione una opcion: ";
+            cin >> opcion;
+        }
+        MPI_Bcast(&opcion, 1, MPI_INT, 0, MPI_COMM_WORLD);
+
+        if (opcion == 1 || opcion == 2) {
+            long long operacionesPorCliente = (opcion == 1) ? 5 : 100000;
+            bool detallado = (opcion == 1);
+
+            MPI_Barrier(MPI_COMM_WORLD);
+            double inicioTiempo = MPI_Wtime();
+
+            if (rank == 0) {
+                long long transaccionesProcesadas = 0;
+                ejecutarServidor(numProcesos, equipo, log, detallado, transaccionesProcesadas, saldo_cuenta);
+
+                double finTiempo = MPI_Wtime();
+                ostringstream resumen;
+                resumen << fixed << setprecision(6);
+                resumen << "--- Ronda finalizada --- Transacciones procesadas: " << transaccionesProcesadas
+                        << " | Saldo final consolidado: " << formatoMonto(saldo_cuenta)
+                        << " | Tiempo total: " << (finTiempo - inicioTiempo) << " segundos";
+                log.escribir(resumen.str());
+            } else {
+                ejecutarCliente(rank, equipo, log, detallado, operacionesPorCliente);
+
+                double finTiempo = MPI_Wtime();
+                ostringstream resumen;
+                resumen << fixed << setprecision(6);
+                resumen << "[Equipo: " << equipo << "][Proceso MPI: " << rank << "] Ronda finalizada. Tiempo: "
+                        << (finTiempo - inicioTiempo) << " segundos";
+                log.escribir(resumen.str());
+            }
+        }
+        else if (opcion == 3) {
+            if (rank == 0) {
+                ostringstream msg;
+                msg << "[Equipo: " << equipo << "][Nodo MPI: 0][Consulta directa] Saldo final del servidor: "
+                    << formatoMonto(saldo_cuenta);
+                log.escribir(msg.str());
+            }
+        }
+        else if (opcion == 4) {
+            if (rank == 0) cout << "Saliendo del programa...\n";
+        }
+        else {
+            if (rank == 0) cout << "Opcion invalida.\n";
+        }
+
+    } while (opcion != 4);
+
+    MPI_Barrier(MPI_COMM_WORLD);
+    if (rank == 0) {
+        log.escribir("Avila Martinez Marco | Larios Hernandez Carlos Alberto | Macias Renteria Dante Yael | Salcedo Ramos Luis Gael");
+    }
+
+    MPI_Finalize();
+    return 0;
+}
