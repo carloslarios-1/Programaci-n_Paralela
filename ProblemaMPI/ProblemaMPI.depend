@@ -1,0 +1,13 @@
+# depslib dependency file v1.0
+1791700907 source:c:\proyectosmpi\problemampi\main.cpp
+	<mpi.h>
+	<omp.h>
+	<iostream>
+	<fstream>
+	<sstream>
+	<iomanip>
+	<string>
+	<cstring>
+	<ctime>
+	<chrono>
+
